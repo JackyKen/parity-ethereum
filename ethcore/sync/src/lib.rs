@@ -59,23 +59,46 @@ extern crate heapsize;
 #[macro_use]
 extern crate trace_time;
 
-mod chain;
-mod blocks;
-mod block_sync;
-mod sync_io;
-mod private_tx;
-mod snapshot;
-mod transactions_stats;
-
+pub mod common_types;
+#[cfg(feature = "light")]
 pub mod light_sync;
+#[cfg(not(feature = "light"))]
+pub mod full_sync;
 
-#[cfg(test)]
-mod tests;
+pub use devp2p::{NetworkService, validate_node_url};
+pub use network::{NonReservedPeerMode, Error, ErrorKind, ConnectionFilter, ConnectionDirection, PeerId};
+pub use common_types::*;
 
-mod api;
+#[cfg(feature = "light")]
+pub use light_sync::*;
+#[cfg(not(feature = "light"))]
+pub use full_sync::chain::{SyncStatus, SyncState};
+#[cfg(not(feature = "light"))]
+pub use full_sync::private_tx::{PrivateTxHandler, NoopPrivateTxHandler, SimplePrivateTxHandler};
+#[cfg(not(feature = "light"))]
+pub use full_sync::*;
 
-pub use api::*;
-pub use chain::{SyncStatus, SyncState};
-pub use devp2p::validate_node_url;
-pub use network::{NonReservedPeerMode, Error, ErrorKind, ConnectionFilter, ConnectionDirection};
-pub use private_tx::{PrivateTxHandler, NoopPrivateTxHandler, SimplePrivateTxHandler};
+use std::ops::Range;
+use network::{NetworkContext, ProtocolId};
+
+/// Trait for managing network
+pub trait ManageNetwork : Send + Sync {
+	/// Set to allow unreserved peers to connect
+	fn accept_unreserved_peers(&self);
+	/// Set to deny unreserved peers to connect
+	fn deny_unreserved_peers(&self);
+	/// Remove reservation for the peer
+	fn remove_reserved_peer(&self, peer: String) -> Result<(), String>;
+	/// Add reserved peer
+	fn add_reserved_peer(&self, peer: String) -> Result<(), String>;
+	/// Start network
+	fn start_network(&self);
+	/// Stop network
+	fn stop_network(&self);
+	/// Returns the minimum and maximum peers.
+	/// Note that `range.end` is *exclusive*.
+	// TODO: Range should be changed to RangeInclusive once stable (https://github.com/rust-lang/rust/pull/50758)
+	fn num_peers_range(&self) -> Range<u32>;
+	/// Get network context for protocol.
+	fn with_proto_context(&self, proto: ProtocolId, f: &mut FnMut(&NetworkContext));
+}

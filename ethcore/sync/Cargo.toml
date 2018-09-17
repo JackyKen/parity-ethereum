@@ -42,3 +42,7 @@ ethkey = { path = "../../ethkey" }
 kvdb-memorydb = "0.1"
 ethcore-private-tx = { path = "../private-tx" }
 ethcore = { path = "..", features = ["test-helpers"] }
+
+[features]
+default = []
+light = []

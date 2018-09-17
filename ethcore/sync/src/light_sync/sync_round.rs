@@ -22,12 +22,10 @@ use std::fmt;
 
 use ethcore::encoded;
 use ethcore::header::Header;
-
+use ethereum_types::H256;
 use light::net::ReqId;
 use light::request::CompleteHeadersRequest as HeadersRequest;
-
 use network::PeerId;
-use ethereum_types::H256;
 
 use super::response;
 

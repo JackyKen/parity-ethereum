@@ -96,6 +96,7 @@ slow-blocks = ["ethcore/slow-blocks"]
 secretstore = ["ethcore-secretstore"]
 final = ["parity-version/final"]
 deadlock_detection = ["parking_lot/deadlock_detection"]
+light = ["ethcore-sync/light"]
 # to create a memory profile (requires nightly rust), use e.g.
 # `heaptrack /path/to/parity <parity params>`,
 # to visualize a memory profile, use `heaptrack_gui`

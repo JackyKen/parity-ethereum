@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::time::{Instant, Duration};
 
 use ethcore::encoded;
+use ethereum_types::{H256, U256};
 use light::client::{AsLightClient, LightChainClient};
 use light::net::{
 	PeerStatus, Announcement, Handler, BasicContext,
@@ -45,18 +46,23 @@ use light::net::{
 	Error as NetError,
 };
 use light::request::{self, CompleteHeadersRequest as HeadersRequest};
+use light_sync::api::SyncInfo;
 use network::PeerId;
-use ethereum_types::{H256, U256};
 use parking_lot::{Mutex, RwLock};
 use rand::{Rng, OsRng};
 
 use self::sync_round::{AbortReason, SyncRound, ResponseContext};
 
+mod api;
+mod impls;
 mod response;
 mod sync_round;
 
 #[cfg(test)]
 mod tests;
+
+pub use super::*;
+pub use super::common_types::*;
 
 // Base value for the header request timeout.
 const REQ_TIMEOUT_BASE: Duration = Duration::from_secs(7);
@@ -228,7 +234,7 @@ impl<'a> ResponseContext for ResponseCtx<'a> {
 }
 
 /// Light client synchronization manager. See module docs for more details.
-pub struct LightSync<L: AsLightClient> {
+pub struct LightSyncInternal<L: AsLightClient> {
 	start_block_number: u64,
 	best_seen: Mutex<Option<ChainInfo>>, // best seen block on the network.
 	peers: RwLock<HashMap<PeerId, Mutex<Peer>>>, // peers which are relevant to synchronization.
@@ -244,7 +250,7 @@ struct PendingReq {
 	timeout: Duration,
 }
 
-impl<L: AsLightClient + Send + Sync> Handler for LightSync<L> {
+impl<L: AsLightClient + Send + Sync> Handler for LightSyncInternal<L> {
 	fn on_connect(
 		&self,
 		ctx: &EventContext,
@@ -407,7 +413,7 @@ impl<L: AsLightClient + Send + Sync> Handler for LightSync<L> {
 }
 
 // private helpers
-impl<L: AsLightClient> LightSync<L> {
+impl<L: AsLightClient> LightSyncInternal<L> {
 	// Begins a search for the common ancestor and our best block.
 	// does not lock state, instead has a mutable reference to it passed.
 	fn begin_search(&self, state: &mut SyncState) {
@@ -638,13 +644,13 @@ impl<L: AsLightClient> LightSync<L> {
 }
 
 // public API
-impl<L: AsLightClient> LightSync<L> {
+impl<L: AsLightClient> LightSyncInternal<L> {
 	/// Create a new instance of `LightSync`.
 	///
 	/// This won't do anything until registered as a handler
 	/// so it can act on events.
 	pub fn new(client: Arc<L>) -> Result<Self, ::std::io::Error> {
-		Ok(LightSync {
+		Ok(Self {
 			start_block_number: client.as_light_client().chain_info().best_block_number,
 			best_seen: Mutex::new(None),
 			peers: RwLock::new(HashMap::new()),
@@ -656,22 +662,7 @@ impl<L: AsLightClient> LightSync<L> {
 	}
 }
 
-/// Trait for erasing the type of a light sync object and exposing read-only methods.
-pub trait SyncInfo {
-	/// Get the highest block advertised on the network.
-	fn highest_block(&self) -> Option<u64>;
-
-	/// Get the block number at the time of sync start.
-	fn start_block(&self) -> u64;
-
-	/// Whether major sync is underway.
-	fn is_major_importing(&self) -> bool;
-
-	/// Whether major sync is underway, skipping some synchronization.
-	fn is_major_importing_no_sync(&self) -> bool;
-}
-
-impl<L: AsLightClient> SyncInfo for LightSync<L> {
+impl<L: AsLightClient> SyncInfo for LightSyncInternal<L> {
 	fn highest_block(&self) -> Option<u64> {
 		self.best_seen.lock().as_ref().map(|x| x.head_num)
 	}
