@@ -59,24 +59,30 @@ extern crate heapsize;
 #[macro_use]
 extern crate trace_time;
 
+/// common types
 pub mod common_types;
-#[cfg(feature = "light")]
-pub mod light_sync;
-#[cfg(not(feature = "light"))]
-pub mod full_sync;
 
+#[cfg(feature = "light")]
+mod light_sync;
+
+#[cfg(feature = "full")]
+mod full_sync;
+
+#[cfg(test)]
+mod tests;
+
+pub use common_types::{AttachedProtocol, EthProtocolInfo, LIGHT_PROTOCOL, NetworkConfiguration, PipProtocolInfo, PeerInfo, TransactionStats};
 pub use devp2p::{NetworkService, validate_node_url};
 pub use network::{NonReservedPeerMode, Error, ErrorKind, ConnectionFilter, ConnectionDirection, PeerId};
-pub use common_types::*;
 
 #[cfg(feature = "light")]
-pub use light_sync::*;
-#[cfg(not(feature = "light"))]
+pub use light_sync::{LightSync, LightSyncParams, LightSyncProvider};
+#[cfg(feature = "full")]
 pub use full_sync::chain::{SyncStatus, SyncState};
-#[cfg(not(feature = "light"))]
+#[cfg(feature = "full")]
 pub use full_sync::private_tx::{PrivateTxHandler, NoopPrivateTxHandler, SimplePrivateTxHandler};
-#[cfg(not(feature = "light"))]
-pub use full_sync::*;
+#[cfg(feature = "full")]
+pub use full_sync::{EthSync, WarpSync, SyncProvider, SyncConfig, Params};
 
 use std::ops::Range;
 use network::{NetworkContext, ProtocolId};

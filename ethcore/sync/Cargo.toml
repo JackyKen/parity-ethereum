@@ -44,5 +44,6 @@ ethcore-private-tx = { path = "../private-tx" }
 ethcore = { path = "..", features = ["test-helpers"] }
 
 [features]
-default = []
+default = ["full", "light"]
+full = []
 light = []
