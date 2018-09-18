@@ -36,33 +36,36 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::sync::Arc;
 use std::time::{Instant, Duration};
+use std::collections::BTreeMap;
+use std::ops::Range;
+use std::io;
 
 use ethcore::encoded;
 use ethereum_types::{H256, U256};
+use devp2p::NetworkService;
 use light::client::{AsLightClient, LightChainClient};
 use light::net::{
 	PeerStatus, Announcement, Handler, BasicContext,
 	EventContext, Capabilities, ReqId, Status,
-	Error as NetError,
+	Error as NetError, LightProtocol, 
+        Params as LightParams,  Handler as LightHandler
 };
 use light::request::{self, CompleteHeadersRequest as HeadersRequest};
+use light::Provider;
 use light_sync::api::SyncInfo;
-use network::PeerId;
+use network::{NetworkContext, NetworkConfiguration as BasicNetworkConfiguration, NonReservedPeerMode, PeerId, ProtocolId, Error, ErrorKind};
 use parking_lot::{Mutex, RwLock};
 use rand::{Rng, OsRng};
 
 use self::sync_round::{AbortReason, SyncRound, ResponseContext};
 
 mod api;
-mod impls;
 mod response;
 mod sync_round;
 
-#[cfg(test)]
-mod tests;
-
-pub use super::*;
-pub use super::common_types::*;
+pub use super::ManageNetwork;
+pub use common_types::{AttachedProtocol, PeerNumbers, PeerInfo, TransactionStats};
+pub use self::api::LightSyncProvider;
 
 // Base value for the header request timeout.
 const REQ_TIMEOUT_BASE: Duration = Duration::from_secs(7);
@@ -234,7 +237,7 @@ impl<'a> ResponseContext for ResponseCtx<'a> {
 }
 
 /// Light client synchronization manager. See module docs for more details.
-pub struct LightSyncInternal<L: AsLightClient> {
+pub struct LightSyncManager<L: AsLightClient> {
 	start_block_number: u64,
 	best_seen: Mutex<Option<ChainInfo>>, // best seen block on the network.
 	peers: RwLock<HashMap<PeerId, Mutex<Peer>>>, // peers which are relevant to synchronization.
@@ -250,7 +253,7 @@ struct PendingReq {
 	timeout: Duration,
 }
 
-impl<L: AsLightClient + Send + Sync> Handler for LightSyncInternal<L> {
+impl<L: AsLightClient + Send + Sync> Handler for LightSyncManager<L> {
 	fn on_connect(
 		&self,
 		ctx: &EventContext,
@@ -413,7 +416,7 @@ impl<L: AsLightClient + Send + Sync> Handler for LightSyncInternal<L> {
 }
 
 // private helpers
-impl<L: AsLightClient> LightSyncInternal<L> {
+impl<L: AsLightClient> LightSyncManager<L> {
 	// Begins a search for the common ancestor and our best block.
 	// does not lock state, instead has a mutable reference to it passed.
 	fn begin_search(&self, state: &mut SyncState) {
@@ -644,7 +647,7 @@ impl<L: AsLightClient> LightSyncInternal<L> {
 }
 
 // public API
-impl<L: AsLightClient> LightSyncInternal<L> {
+impl<L: AsLightClient> LightSyncManager<L> {
 	/// Create a new instance of `LightSync`.
 	///
 	/// This won't do anything until registered as a handler
@@ -662,7 +665,7 @@ impl<L: AsLightClient> LightSyncInternal<L> {
 	}
 }
 
-impl<L: AsLightClient> SyncInfo for LightSyncInternal<L> {
+impl<L: AsLightClient> SyncInfo for LightSyncManager<L> {
 	fn highest_block(&self) -> Option<u64> {
 		self.best_seen.lock().as_ref().map(|x| x.head_num)
 	}
@@ -679,4 +682,192 @@ impl<L: AsLightClient> SyncInfo for LightSyncInternal<L> {
 		self.is_major_importing_do_wait(false)
 	}
 
+}
+
+/// Configuration for the light sync.
+pub struct LightSyncParams<L> {
+	/// Network configuration.
+	pub network_config: BasicNetworkConfiguration,
+	/// Light client to sync to.
+	pub client: Arc<L>,
+	/// Network ID.
+	pub network_id: u64,
+	/// Subprotocol name.
+	pub subprotocol_name: [u8; 3],
+	/// Other handlers to attach.
+	pub handlers: Vec<Arc<LightHandler>>,
+	/// Other subprotocols to run.
+	pub attached_protos: Vec<AttachedProtocol>,
+}
+
+/// Service for light synchronization.
+pub struct LightSync {
+	proto: Arc<LightProtocol>,
+	sync: Arc<SyncInfo + Sync + Send>,
+	attached_protos: Vec<AttachedProtocol>,
+	network: NetworkService,
+	subprotocol_name: [u8; 3],
+	network_id: u64,
+}
+
+impl LightSync {
+	/// Create a new light sync service.
+	pub fn new<L>(params: LightSyncParams<L>) -> Result<Self, Error>
+		where L: AsLightClient + Provider + Sync + Send + 'static
+	{
+		use light_sync::LightSyncManager as SyncHandler;
+
+		// initialize light protocol handler and attach sync module.
+		let (sync, light_proto) = {
+			let light_params = LightParams {
+				network_id: params.network_id,
+				config: Default::default(),
+				capabilities: Capabilities {
+					serve_headers: false,
+					serve_chain_since: None,
+					serve_state_since: None,
+					tx_relay: false,
+				},
+				sample_store: None,
+			};
+
+			let mut light_proto = LightProtocol::new(params.client.clone(), light_params);
+			let sync_handler = Arc::new(SyncHandler::new(params.client.clone())?);
+			light_proto.add_handler(sync_handler.clone());
+
+			for handler in params.handlers {
+				light_proto.add_handler(handler);
+			}
+
+			(sync_handler, Arc::new(light_proto))
+		};
+
+		let service = NetworkService::new(params.network_config, None)?;
+
+		Ok(LightSync {
+			proto: light_proto,
+			sync: sync,
+			attached_protos: params.attached_protos,
+			network: service,
+			subprotocol_name: params.subprotocol_name,
+			network_id: params.network_id,
+		})
+	}
+
+	/// Execute a closure with a protocol context.
+	pub fn with_context<F, T>(&self, f: F) -> Option<T>
+		where F: FnOnce(&::light::net::BasicContext) -> T
+	{
+		self.network.with_context_eval(
+			self.subprotocol_name,
+			move |ctx| self.proto.with_context(&ctx, f),
+		)
+	}
+}
+
+impl ::std::ops::Deref for LightSync {
+	type Target = SyncInfo;
+
+	fn deref(&self) -> &Self::Target { &*self.sync }
+}
+
+impl ManageNetwork for LightSync {
+	fn accept_unreserved_peers(&self) {
+		self.network.set_non_reserved_mode(NonReservedPeerMode::Accept);
+	}
+
+	fn deny_unreserved_peers(&self) {
+		self.network.set_non_reserved_mode(NonReservedPeerMode::Deny);
+	}
+
+	fn remove_reserved_peer(&self, peer: String) -> Result<(), String> {
+		self.network.remove_reserved_peer(&peer).map_err(|e| format!("{:?}", e))
+	}
+
+	fn add_reserved_peer(&self, peer: String) -> Result<(), String> {
+		self.network.add_reserved_peer(&peer).map_err(|e| format!("{:?}", e))
+	}
+
+	fn start_network(&self) {
+		match self.network.start() {
+			Err((err, listen_address)) => {
+				match err.into() {
+					ErrorKind::Io(ref e) if e.kind() == io::ErrorKind::AddrInUse => {
+						warn!("Network port {:?} is already in use, make sure that another instance of an Ethereum client is not running or change the port using the --port option.", listen_address.expect("Listen address is not set."))
+					},
+					err => warn!("Error starting network: {}", err),
+				}
+			},
+			_ => {},
+		}
+
+		let light_proto = self.proto.clone();
+
+		self.network.register_protocol(light_proto, self.subprotocol_name, ::light::net::PROTOCOL_VERSIONS)
+			.unwrap_or_else(|e| warn!("Error registering light client protocol: {:?}", e));
+
+		for proto in &self.attached_protos { proto.register(&self.network) }
+	}
+
+	fn stop_network(&self) {
+		self.proto.abort();
+		self.network.stop();
+	}
+
+	fn num_peers_range(&self) -> Range<u32> {
+		self.network.num_peers_range()
+	}
+
+	fn with_proto_context(&self, proto: ProtocolId, f: &mut FnMut(&NetworkContext)) {
+		self.network.with_context_eval(proto, f);
+	}
+}
+
+impl LightSyncProvider for LightSync {
+	fn peer_numbers(&self) -> PeerNumbers {
+		let (connected, active) = self.proto.peer_count();
+		let peers_range = self.num_peers_range();
+		debug_assert!(peers_range.end > peers_range.start);
+		PeerNumbers {
+			connected: connected,
+			active: active,
+			max: peers_range.end as usize - 1,
+			min: peers_range.start as usize,
+		}
+	}
+
+	fn peers(&self) -> Vec<PeerInfo> {
+		self.network.with_context_eval(self.subprotocol_name, |ctx| {
+			let peer_ids = self.network.connected_peers();
+
+			peer_ids.into_iter().filter_map(|peer_id| {
+				let session_info = match ctx.session_info(peer_id) {
+					None => return None,
+					Some(info) => info,
+				};
+
+				Some(PeerInfo {
+					id: session_info.id.map(|id| format!("{:x}", id)),
+					client_version: session_info.client_version,
+					capabilities: session_info.peer_capabilities.into_iter().map(|c| c.to_string()).collect(),
+					remote_address: session_info.remote_address,
+					local_address: session_info.local_address,
+					eth_info: None,
+					pip_info: self.proto.peer_status(peer_id).map(Into::into),
+				})
+			}).collect()
+		}).unwrap_or_else(Vec::new)
+	}
+
+	fn enode(&self) -> Option<String> {
+		self.network.external_url()
+	}
+
+	fn network_id(&self) -> u64 {
+		self.network_id
+	}
+
+	fn transactions_stats(&self) -> BTreeMap<H256, TransactionStats> {
+		Default::default() // TODO
+	}
 }

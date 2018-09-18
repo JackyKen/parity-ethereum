@@ -15,10 +15,12 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 pub mod helpers;
+pub mod light_testnet;
 pub mod snapshot;
 mod chain;
 mod consensus;
 mod private;
+mod light;
 
 #[cfg(feature = "ipc")]
 mod rpc;

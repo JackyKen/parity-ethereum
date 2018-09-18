@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 use ethcore::client::{TestBlockChainClient, BlockChainClient, BlockId, EachBlockWith, ChainInfo, BlockInfo};
-use chain::{SyncState};
+use full_sync::chain::{SyncState};
 use super::helpers::*;
 use {SyncConfig, WarpSync};
 
