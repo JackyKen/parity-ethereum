@@ -98,7 +98,7 @@ pub struct AttachedProtocol {
 
 impl AttachedProtocol {
 	/// Register a network service
-	pub fn register(&self, network: &NetworkService) {
+	pub (crate) fn register(&self, network: &NetworkService) {
 		let res = network.register_protocol(
 			self.handler.clone(),
 			self.protocol_id,
